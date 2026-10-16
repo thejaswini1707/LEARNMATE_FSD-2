@@ -1,0 +1,177 @@
+// LearnMate database schema.
+// Mirrors the entities already used by the existing frontend (src/services/api.js):
+// User, Booking, Review, Material, Message. Field names and value shapes (e.g. role
+// strings "Student"/"Tutor"/"Admin", status strings) match what the UI already expects,
+// so the frontend needed no data-shape changes — only its data-fetching layer changed.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  Student
+  Tutor
+  Admin
+}
+
+enum BookingStatus {
+  Pending
+  Confirmed
+  Declined
+  Completed
+  Cancelled
+}
+
+enum MateUpStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model User {
+  id                String    @id @default(uuid())
+  name              String
+  email             String    @unique
+  mobile            String    @default("")
+  role              Role
+  department        String    @default("")
+  year              String    @default("")
+  college           String    @default("")
+  skills            String    @default("") // comma-separated, matches frontend parseSkills()
+  bio               String    @default("")
+  level             String    @default("")
+  mode              String    @default("")
+  availability      String    @default("")
+  avatar            String    @default("") @db.Text // base64 data URL, resized client-side before upload
+  passwordHash      String
+  notifSeenAt       DateTime?
+  // Set when the password is reset; JWTs issued before this moment are rejected (see middleware/auth.js).
+  passwordChangedAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  bookingsAsStudent Booking[]            @relation("StudentBookings")
+  bookingsAsTutor   Booking[]            @relation("TutorBookings")
+  reviewsGiven      Review[]             @relation("StudentReviews")
+  reviewsReceived   Review[]             @relation("TutorReviews")
+  materials         Material[]
+  passwordResets    PasswordResetToken[]
+  mateUpsSent       MateUpRequest[]      @relation("MateUpSender")
+  mateUpsReceived   MateUpRequest[]      @relation("MateUpReceiver")
+
+  @@index([role])
+}
+
+model Booking {
+  id        String        @id @default(uuid())
+  tutorId   String
+  tutor     User          @relation("TutorBookings", fields: [tutorId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User          @relation("StudentBookings", fields: [studentId], references: [id], onDelete: Cascade)
+  subject   String
+  date      String // ISO date, e.g. "2026-10-04"
+  time      String // 24h time, e.g. "15:30"
+  mode      String
+  topic     String        @db.Text
+  status    BookingStatus @default(Pending)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  review Review?
+  // NOTE: the migration also creates a partial UNIQUE index on ("tutorId","date","time")
+  // WHERE status IN ('Pending','Confirmed') so a tutor can never hold two active sessions in
+  // one slot. Prisma cannot express partial indexes in this file; it lives in the migration SQL.
+
+  @@index([tutorId])
+  @@index([studentId])
+  @@index([status])
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  tutorId   String
+  tutor     User     @relation("TutorReviews", fields: [tutorId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User     @relation("StudentReviews", fields: [studentId], references: [id], onDelete: Cascade)
+  // The completed session this review is about. Nullable only so reviews written before this
+  // column existed are preserved; every new review must reference a completed booking.
+  // @unique => one review per session.
+  bookingId String?  @unique
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  subject   String
+  rating    Int
+  comment   String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([tutorId])
+  @@index([studentId])
+}
+
+model Material {
+  id          String   @id @default(uuid())
+  title       String
+  subject     String
+  type        String // file extension, uppercased (PDF, DOCX, ...)
+  description String   @db.Text
+  uploaderId  String?
+  uploader    User?    @relation(fields: [uploaderId], references: [id], onDelete: SetNull)
+  fileName    String
+  fileSize    Int
+  fileType    String
+  storedName  String // filename on disk under uploads/materials/
+  createdAt   DateTime @default(now())
+
+  @@index([subject])
+  @@index([uploaderId])
+}
+
+model Message {
+  id             String    @id @default(uuid())
+  conversationId String // sorted pair of participant emails joined with "|" (matches frontend's conversationId())
+  fromEmail      String
+  recipientEmail String    @default("") // the other participant; lets unread counts be a single indexed query
+  text           String    @db.Text
+  pinned         Boolean   @default(false)
+  replyTo        Json?
+  readAt         DateTime? // null = recipient has not opened the conversation yet
+  createdAt      DateTime  @default(now())
+
+  @@index([conversationId])
+  @@index([recipientEmail, readAt])
+}
+
+model MateUpRequest {
+  id         String       @id @default(uuid())
+  senderId   String
+  sender     User         @relation("MateUpSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId String
+  receiver   User         @relation("MateUpReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  // Sorted "idA|idB" of the two users. UNIQUE => at most one row per pair no matter who sent it,
+  // which blocks duplicate pending requests, reverse-direction duplicates and duplicate connections.
+  pairKey    String       @unique
+  status     MateUpStatus @default(PENDING)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  // The migration also adds CHECK ("senderId" <> "receiverId").
+
+  @@index([receiverId, status])
+  @@index([senderId, status])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique // SHA-256 of the emailed token; the raw token is never stored
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
